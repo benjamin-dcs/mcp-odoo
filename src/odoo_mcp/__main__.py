@@ -14,6 +14,7 @@ import traceback
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .auth import build_auth
+from .rights_report import start_rights_report
 from .server import mcp
 
 SUPPORTED_MCP_TRANSPORTS = {"stdio", "streamable-http", "sse"}
@@ -348,6 +349,7 @@ def main() -> int:
             if args.transport == "streamable-http":
                 print(f"  Path: {args.path}", file=sys.stderr)
         sys.stderr.flush()
+        start_rights_report(args.transport)
         mcp.run(transport=args.transport, **runtime_options)
 
         print("MCP server stopped normally", file=sys.stderr)

@@ -264,7 +264,7 @@ Optional environment variables:
 | `ODOO_MCP_KNOWLEDGE_MAX_DOCS` | `5000` | Total documents allowed across all local BM25 knowledge indexes. |
 | `ODOO_MCP_FIELD_POLICY_FILE` | shared policy file | Field ACL policy (a `field_acl` key in the policy file, or a dedicated file here). Denied fields are removed from every read path. See [docs/field-acl.md](docs/field-acl.md). |
 | `ODOO_MCP_MODEL_POLICY_FILE` | shared policy file | Model/method ACL policy (a `model_acl` key in the policy file, or a dedicated file here). Denied model/method calls are refused before they reach Odoo. See [docs/model-acl.md](docs/model-acl.md). |
-| `ODOO_MCP_LOG_RIGHTS` | off | Set to `1` to log, once per instance on first connect, the Odoo user's model rights (read/write/create/delete from `ir.model.access`) and, separately, what `model_acl` blocks of those. Summary at INFO, per-model lines at DEBUG. See [docs/model-acl.md](docs/model-acl.md#seeing-the-effective-rights). |
+| `ODOO_MCP_LOG_RIGHTS` | off | Set to `1` to log, once per instance (at startup for HTTP transports, on the first Odoo call for stdio), the Odoo user's model rights (read/write/create/delete from `ir.model.access`) and, separately, what `model_acl` blocks of those. Summary at INFO, per-model lines at DEBUG. See [docs/model-acl.md](docs/model-acl.md#seeing-the-effective-rights). |
 | `ODOO_MCP_CROSS_INSTANCE_WORKERS` | `4` | Bounded concurrency for cross-instance fan-out tools. |
 | `MCP_CHATTER_DIRECT` | `0` | Truthy → `chatter_post` skips the approval token gate and posts immediately. |
 | `MCP_ALLOW_REMOTE_HTTP` | `0` | Truthy → permit non-local HTTP binds (still requires external auth/TLS). |

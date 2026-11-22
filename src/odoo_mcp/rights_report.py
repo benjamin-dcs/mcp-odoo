@@ -1,7 +1,9 @@
 """Opt-in log of the Odoo user's model rights, and model_acl's impact on them.
 
-Enabled with ``ODOO_MCP_LOG_RIGHTS=1``. Once per instance, on the first
-connection, the server logs two separate reports:
+Enabled with ``ODOO_MCP_LOG_RIGHTS=1``. Once per instance the server logs two
+separate reports. With an HTTP transport they are built at startup, in the
+background, for every configured instance; with stdio on the first Odoo
+connection (so a desktop client never waits for Odoo while starting it):
 
 1. **Odoo rights**: what the connected Odoo user may do per model, exactly as
    Odoo grants it through ``ir.model.access`` rows for the user's groups
@@ -267,6 +269,54 @@ def maybe_log_rights(client: Any, instance: str) -> None:
         log_rights_report(client, instance)
     except Exception as exc:  # never let reporting break a connection
         logger.warning("Could not build the rights report for [%s]: %s", instance, exc)
+
+
+def start_rights_report(transport: str) -> Optional[threading.Thread]:
+    """Announce the rights report at startup; for HTTP transports, build it now.
+
+    Returns the background thread (HTTP transports) or None.
+    """
+    if not rights_logging_enabled():
+        return None
+    if transport == "stdio":
+        logger.info(
+            "Rights report enabled (%s): it is logged per instance on the first "
+            "Odoo connection, i.e. the first tool call that reaches Odoo.",
+            RIGHTS_ENV,
+        )
+        return None
+    logger.info(
+        "Rights report enabled (%s): connecting to each configured Odoo instance "
+        "in the background to log it now.",
+        RIGHTS_ENV,
+    )
+    thread = threading.Thread(
+        target=_report_all_instances, name="odoo-mcp-rights-report", daemon=True
+    )
+    thread.start()
+    return thread
+
+
+def _report_all_instances() -> None:
+    """Connect to every configured instance; build_odoo_client logs the report."""
+    # Lazy: odoo_client imports this module.
+    from . import odoo_client
+
+    try:
+        _, instances = odoo_client.load_instances_config()
+    except Exception as exc:
+        logger.warning("Rights report: could not load the Odoo configuration: %s", exc)
+        return
+    for name in instances:
+        try:
+            odoo_client.get_odoo_client_for(name)
+        except Exception as exc:
+            logger.warning(
+                "Rights report [%s]: could not connect to Odoo: %s "
+                "(it will be retried on the first tool call that reaches Odoo)",
+                name,
+                exc,
+            )
 
 
 def reset_rights_log() -> None:

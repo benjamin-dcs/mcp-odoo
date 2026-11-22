@@ -183,3 +183,46 @@ def test_maybe_log_never_raises(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="odoo_mcp.rights_report"):
         maybe_log_rights(FakeClient(fail=True), "default")
     assert "Could not build the rights report" in caplog.text
+
+
+def test_start_is_noop_when_disabled(monkeypatch, caplog):
+    from odoo_mcp.rights_report import start_rights_report
+
+    monkeypatch.delenv("ODOO_MCP_LOG_RIGHTS", raising=False)
+    with caplog.at_level(logging.INFO, logger="odoo_mcp.rights_report"):
+        assert start_rights_report("streamable-http") is None
+    assert caplog.text == ""
+
+
+def test_start_stdio_announces_lazy_report(monkeypatch, caplog):
+    from odoo_mcp.rights_report import start_rights_report
+
+    monkeypatch.setenv("ODOO_MCP_LOG_RIGHTS", "1")
+    with caplog.at_level(logging.INFO, logger="odoo_mcp.rights_report"):
+        assert start_rights_report("stdio") is None
+    assert "first tool call that reaches Odoo" in caplog.text
+
+
+def test_start_http_reports_every_instance_in_background(monkeypatch, caplog):
+    import odoo_mcp.odoo_client as oc
+    from odoo_mcp.rights_report import start_rights_report
+
+    monkeypatch.setenv("ODOO_MCP_LOG_RIGHTS", "1")
+    monkeypatch.setattr(
+        oc, "load_instances_config", lambda: ("main", {"main": {}, "broken": {}})
+    )
+
+    def fake_client_for(name):
+        if name == "broken":
+            raise ConnectionError("unreachable")
+        maybe_log_rights(FakeClient(), name)
+        return name, FakeClient()
+
+    monkeypatch.setattr(oc, "get_odoo_client_for", fake_client_for)
+    with caplog.at_level(logging.INFO, logger="odoo_mcp.rights_report"):
+        thread = start_rights_report("streamable-http")
+        assert thread is not None
+        thread.join(timeout=5)
+    assert "connecting to each configured Odoo instance" in caplog.text
+    assert "Odoo rights [main] for user agent@example.com" in caplog.text
+    assert "Rights report [broken]: could not connect to Odoo: unreachable" in caplog.text

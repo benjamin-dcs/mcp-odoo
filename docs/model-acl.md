@@ -246,8 +246,8 @@ the review off entirely, for trusted deployments only.
 
 ## Seeing the effective rights
 
-Set `ODOO_MCP_LOG_RIGHTS=1` to log, once per instance when the server first
-connects, two separate reports:
+Set `ODOO_MCP_LOG_RIGHTS=1` to log two separate reports, once per
+instance:
 
 1. **Odoo rights**: what the connected Odoo user may do on each model, as
    Odoo grants it through `ir.model.access` rows for the user's groups
@@ -255,6 +255,16 @@ connects, two separate reports:
 2. **model_acl impact**: for the models the user has Odoo rights on, which
    of those operations `model_acl` blocks, plus the methods named in rules
    for that model and whether other methods are allowed.
+
+When it runs:
+
+- **HTTP transports** (`streamable-http`, `sse`): right at startup, in the
+  background, for every configured instance. The server doesn't wait for
+  it. If an instance can't be reached, a warning is logged and it is retried
+  on the first tool call that reaches Odoo.
+- **stdio**: on the first tool call that reaches Odoo, so a desktop client
+  never waits for Odoo while starting the server. A startup line says so.
+  `health_check` and `list_instances` don't reach Odoo.
 
 The summary is logged at INFO. Set `ODOO_MCP_LOG_LEVEL=DEBUG` to also get
 one line per model:
