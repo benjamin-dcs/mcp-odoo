@@ -2,25 +2,29 @@
 
 import json
 import logging
+import xmlrpc.client
 
 import pytest
 
 from odoo_mcp.model_policy import _parse_model_policy, reset_model_policy
 from odoo_mcp.rights_report import (
+    COMMON_MODELS,
+    AccessProbe,
+    candidate_models,
+    collect_odoo_rights,
     format_acl_impact,
     format_odoo_rights,
     log_rights_report,
-    maybe_log_rights,
     model_acl_impact,
     odoo_model_rights,
-    reset_rights_log,
+    start_rights_report,
 )
 
 MODELS = {1: "project.project", 2: "project.task", 3: "res.partner", 4: "hr.employee"}
 GROUP_USER, GROUP_MANAGER, GROUP_OTHER = 10, 11, 12
 
 ACL_ROWS = [
-    # global read on partners
+    # global read on partners (Odoo sends False for "no group")
     {"model_id": [3, "Contact"], "group_id": False, "perm_read": True},
     # user group: read projects/tasks, write tasks
     {"model_id": [1, "Project"], "group_id": [GROUP_USER, "User"], "perm_read": True},
@@ -43,12 +47,18 @@ ACL_ROWS = [
     {"model_id": [4, "Employee"], "group_id": [GROUP_OTHER, "HR"], "perm_read": True},
 ]
 
+# What a non-admin user may do, as Odoo answers has_access/check_access_rights.
+PROBE_RIGHTS = {
+    "project.project": {"read"},
+    "project.task": {"read", "write", "create"},
+    "res.partner": {"read"},
+}
+INSTALLED = set(COMMON_MODELS) - {"helpdesk.ticket", "mrp.production"}
 
-@pytest.fixture(autouse=True)
-def _reset():
-    reset_rights_log()
-    yield
-    reset_rights_log()
+
+# --------------------------------------------------------------------------
+# Pure computation
+# --------------------------------------------------------------------------
 
 
 def test_odoo_rights_union_of_applicable_rows():
@@ -109,12 +119,44 @@ def test_format_odoo_rights():
     ]
 
 
-class FakeClient:
-    uid = 7
-    username = "agent@example.com"
+def test_candidate_models_include_rules_env_and_report_unmatched_globs(monkeypatch):
+    monkeypatch.setenv("ODOO_MCP_LOG_RIGHTS_MODELS", "x_custom.model, quality.check")
+    policy = _parse_model_policy(
+        {
+            "model_acl": {
+                "default": {
+                    "default": "deny",
+                    "rules": [
+                        {"allow": "fleet.vehicle:@read"},
+                        {"allow": "project.*"},
+                        {"allow": "website.*"},
+                    ],
+                }
+            }
+        }
+    )
+    models, unmatched = candidate_models(policy, "default")
+    assert {"fleet.vehicle", "x_custom.model", "quality.check", "res.partner"} <= set(models)
+    assert unmatched == ["website.*"]  # project.* matches common models
 
-    def __init__(self, fail=False):
-        self.fail = fail
+
+# --------------------------------------------------------------------------
+# Fake Odoo clients
+# --------------------------------------------------------------------------
+
+
+def fault(message):
+    return xmlrpc.client.Fault(4, message)
+
+
+class AdminClient:
+    """May read ir.model / ir.model.access (bulk path)."""
+
+    uid = 7
+    username = "admin@example.com"
+    transport = "xmlrpc"
+
+    def __init__(self):
         self.calls = []
 
     def get_user_context(self):
@@ -122,19 +164,10 @@ class FakeClient:
 
     def execute_method(self, model, method, *args, **kwargs):
         self.calls.append((model, method))
-        if self.fail:
-            raise RuntimeError("Access denied")
         if (model, method) == ("res.users", "fields_get"):
             return {"name": {}, "group_ids": {}, "all_group_ids": {}}
         if (model, method) == ("res.users", "read"):
-            return [
-                {
-                    "id": 7,
-                    "name": "Agent",
-                    "group_ids": [GROUP_USER],
-                    "all_group_ids": [GROUP_USER, GROUP_MANAGER],
-                }
-            ]
+            return [{"id": 7, "group_ids": [GROUP_USER], "all_group_ids": [GROUP_USER, GROUP_MANAGER]}]
         if (model, method) == ("ir.model", "search_read"):
             return [{"id": key, "model": value} for key, value in MODELS.items()]
         if (model, method) == ("ir.model.access", "search_read"):
@@ -142,7 +175,103 @@ class FakeClient:
         raise AssertionError((model, method))
 
 
-def test_log_report_info_and_debug(caplog, monkeypatch, tmp_path):
+class UserClient:
+    """A normal user: no ir.model access; answers per-model access checks."""
+
+    uid = 9
+    username = "user@example.com"
+
+    def __init__(self, methods=("has_access", "check_access_rights"), transport="xmlrpc"):
+        self.methods = methods
+        self.transport = transport
+        self.calls = []
+
+    def get_user_context(self):
+        return {"uid": 9}
+
+    def execute_method(self, model, method, *args, **kwargs):
+        self.calls.append((model, method, args, kwargs))
+        if model in {"ir.model", "ir.model.access"} or (model, method) == (
+            "res.users",
+            "fields_get",
+        ):
+            raise fault(
+                "You are not allowed to access 'Models' (ir.model) records.\n\n"
+                "This operation is allowed for the following groups:\n"
+                "\t- Administration/Access Rights"
+            )
+        if method in {"has_access", "check_access_rights"}:
+            if method not in self.methods:
+                # real XML-RPC shape: the reason is on the traceback's last line
+                raise fault(
+                    "Traceback (most recent call last):\n  ...\n"
+                    f"AttributeError: The method '{model}.{method}' does not exist"
+                )
+            if model not in INSTALLED:
+                raise fault(f"Object {model} doesn't exist")
+            operation = kwargs.get("operation") or (args[1] if method == "has_access" else args[0])
+            return operation in PROBE_RIGHTS.get(model, set())
+        raise AssertionError((model, method))
+
+
+# --------------------------------------------------------------------------
+# Collection
+# --------------------------------------------------------------------------
+
+
+def test_admin_uses_bulk_read():
+    result = collect_odoo_rights(AdminClient())
+    assert result.source == "ir.model.access"
+    assert result.models_checked == 4
+    assert result.rights["project.project"] == ["read", "write", "unlink"]
+
+
+def test_normal_user_falls_back_to_per_model_check():
+    client = UserClient()
+    result = collect_odoo_rights(client)
+    assert result.source == "per-model check"
+    assert "not allowed to access 'Models'" in result.fallback_reason
+    assert result.rights == {
+        "project.project": ["read"],
+        "project.task": ["read", "write", "create"],
+        "res.partner": ["read"],
+    }
+    assert set(result.not_installed) == {"helpdesk.ticket", "mrp.production"}
+    assert result.models_checked == len(COMMON_MODELS) - 2
+    # positional XML-RPC form: ids, then operation
+    call = next(c for c in client.calls if c[1] == "has_access")
+    assert call[2] == ([], "read")
+
+
+def test_older_odoo_without_has_access_uses_check_access_rights():
+    client = UserClient(methods=("check_access_rights",))
+    result = collect_odoo_rights(client)
+    assert result.rights["project.task"] == ["read", "write", "create"]
+    call = next(c for c in client.calls if c[1] == "check_access_rights")
+    assert call[2] == ("read",) and call[3] == {"raise_exception": False}
+    # once detected, has_access is not retried for every model
+    assert sum(1 for c in client.calls if c[1] == "has_access") == 1
+
+
+def test_json2_uses_keyword_arguments():
+    client = UserClient(transport="json2")
+    collect_odoo_rights(client)
+    call = next(c for c in client.calls if c[1] == "has_access")
+    assert call[2] == () and call[3] == {"ids": [], "operation": "read"}
+
+
+def test_probe_raises_when_no_method_is_offered():
+    probe = AccessProbe(UserClient(methods=()))
+    with pytest.raises(RuntimeError, match="neither has_access nor check_access_rights"):
+        probe.check("res.partner", "read")
+
+
+# --------------------------------------------------------------------------
+# Logging
+# --------------------------------------------------------------------------
+
+
+def test_admin_report_info_and_debug(caplog, monkeypatch, tmp_path):
     pf = tmp_path / "policy.json"
     pf.write_text(
         json.dumps({"model_acl": {"default": {"default": "deny", "rules": [{"allow": "project.*"}]}}})
@@ -150,79 +279,125 @@ def test_log_report_info_and_debug(caplog, monkeypatch, tmp_path):
     monkeypatch.setenv("ODOO_MCP_MODEL_POLICY_FILE", str(pf))
     reset_model_policy()
     with caplog.at_level(logging.DEBUG, logger="odoo_mcp.rights_report"):
-        log_rights_report(FakeClient(), "default")
+        log_rights_report(AdminClient(), "default")
     text = caplog.text
-    assert "Odoo rights [default] for user agent@example.com (uid 7): 3 of 4 models" in text
+    assert "Odoo rights [default] for user admin@example.com (uid 7): 3 of 4 models accessible" in text
     assert "Odoo rights [default] project.project: read write unlink" in text
     assert "model_acl impact [default]: of 3 models with Odoo rights, 1 fully blocked" in text
     assert "model_acl impact [default] res.partner: all blocked" in text
 
 
+def test_user_report_explains_fallback(caplog):
+    with caplog.at_level(logging.DEBUG, logger="odoo_mcp.rights_report"):
+        log_rights_report(UserClient(), "default")
+    text = caplog.text
+    assert "may not read the full model list" in text
+    assert "ODOO_MCP_LOG_RIGHTS_MODELS" in text
+    assert "3 of 40 installed candidate models accessible" in text
+    assert "not installed (skipped): helpdesk.ticket mrp.production" in text
+    assert "no model_acl policy for this instance" in text
+
+
 def test_info_level_has_no_per_model_lines(caplog):
     with caplog.at_level(logging.INFO, logger="odoo_mcp.rights_report"):
-        log_rights_report(FakeClient(), "default")
+        log_rights_report(AdminClient(), "default")
     assert "project.project: read" not in caplog.text
-    assert "no model_acl policy for this instance" in caplog.text
 
 
-def test_maybe_log_is_opt_in_and_once_per_instance(monkeypatch, caplog):
-    client = FakeClient()
-    monkeypatch.delenv("ODOO_MCP_LOG_RIGHTS", raising=False)
-    maybe_log_rights(client, "default")
-    assert client.calls == []
-    monkeypatch.setenv("ODOO_MCP_LOG_RIGHTS", "1")
-    with caplog.at_level(logging.INFO, logger="odoo_mcp.rights_report"):
-        maybe_log_rights(client, "default")
-        first = len(client.calls)
-        maybe_log_rights(client, "default")
-    assert first > 0 and len(client.calls) == first
-
-
-def test_maybe_log_never_raises(monkeypatch, caplog):
-    monkeypatch.setenv("ODOO_MCP_LOG_RIGHTS", "1")
-    with caplog.at_level(logging.WARNING, logger="odoo_mcp.rights_report"):
-        maybe_log_rights(FakeClient(fail=True), "default")
-    assert "Could not build the rights report" in caplog.text
+# --------------------------------------------------------------------------
+# Startup
+# --------------------------------------------------------------------------
 
 
 def test_start_is_noop_when_disabled(monkeypatch, caplog):
-    from odoo_mcp.rights_report import start_rights_report
-
     monkeypatch.delenv("ODOO_MCP_LOG_RIGHTS", raising=False)
     with caplog.at_level(logging.INFO, logger="odoo_mcp.rights_report"):
         assert start_rights_report("streamable-http") is None
     assert caplog.text == ""
 
 
-def test_start_stdio_announces_lazy_report(monkeypatch, caplog):
-    from odoo_mcp.rights_report import start_rights_report
-
-    monkeypatch.setenv("ODOO_MCP_LOG_RIGHTS", "1")
-    with caplog.at_level(logging.INFO, logger="odoo_mcp.rights_report"):
-        assert start_rights_report("stdio") is None
-    assert "first tool call that reaches Odoo" in caplog.text
-
-
-def test_start_http_reports_every_instance_in_background(monkeypatch, caplog):
+@pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
+def test_start_reports_every_instance_in_background(monkeypatch, caplog, transport):
     import odoo_mcp.odoo_client as oc
-    from odoo_mcp.rights_report import start_rights_report
 
     monkeypatch.setenv("ODOO_MCP_LOG_RIGHTS", "1")
     monkeypatch.setattr(
-        oc, "load_instances_config", lambda: ("main", {"main": {}, "broken": {}})
+        oc,
+        "load_instances_config",
+        lambda: ("main", {"main": {}, "user": {}, "broken": {}, "failing": {}}),
     )
+
+    class Failing(UserClient):
+        def execute_method(self, model, method, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    clients = {"main": AdminClient(), "user": UserClient(), "failing": Failing()}
 
     def fake_client_for(name):
         if name == "broken":
             raise ConnectionError("unreachable")
-        maybe_log_rights(FakeClient(), name)
-        return name, FakeClient()
+        return name, clients[name]
 
     monkeypatch.setattr(oc, "get_odoo_client_for", fake_client_for)
     with caplog.at_level(logging.INFO, logger="odoo_mcp.rights_report"):
-        thread = start_rights_report("streamable-http")
+        thread = start_rights_report(transport)
         assert thread is not None
         thread.join(timeout=5)
-    assert "connecting to each configured Odoo instance" in caplog.text
-    assert "Odoo rights [main] for user agent@example.com" in caplog.text
-    assert "Rights report [broken]: could not connect to Odoo: unreachable" in caplog.text
+    text = caplog.text
+    assert "connecting to each configured Odoo instance" in text
+    assert "Odoo rights [main] for user admin@example.com" in text
+    assert "Odoo rights [user] for user user@example.com" in text
+    assert "Rights report [broken]: could not connect to Odoo: unreachable" in text
+    assert "Could not build the rights report for [failing]: boom" in text
+
+
+class _Json2Error(Exception):
+    def __init__(self, message):
+        super().__init__(f"JSON-2 request x failed with HTTP 404: {message}")
+        self.odoo_error = {"message": message}
+
+
+@pytest.mark.parametrize(
+    "exc, verdict",
+    [
+        # texts captured from Odoo 19 (XML-RPC and JSON-2)
+        (fault("Object account.account doesn't exist"), "model_missing"),
+        (_Json2Error("the model 'account.account' does not exist"), "model_missing"),
+        (
+            fault(
+                "Traceback (most recent call last):\n...\nAttributeError: "
+                "The method 'account.account.has_access' does not exist"
+            ),
+            "method_unavailable",
+        ),
+        (
+            _Json2Error("The method 'account.account.has_access' does not exist"),
+            "method_unavailable",
+        ),
+        (
+            fault(
+                "Private methods (such as 'account.account.has_access') cannot be "
+                "called remotely."
+            ),
+            "method_unavailable",
+        ),
+        (fault("Access Denied"), "other"),
+    ],
+)
+def test_classify_probe_error_real_texts(exc, verdict):
+    from odoo_mcp.rights_report import classify_probe_error
+
+    assert classify_probe_error(exc, "account.account", "has_access") == verdict
+
+
+def test_json2_missing_model_is_skipped_not_method_error():
+    class Json2User(UserClient):
+        def execute_method(self, model, method, *args, **kwargs):
+            if method == "has_access" and model not in INSTALLED:
+                raise _Json2Error(f"the model '{model}' does not exist")
+            return super().execute_method(model, method, *args, **kwargs)
+
+    client = Json2User(transport="json2")
+    result = collect_odoo_rights(client)
+    assert set(result.not_installed) == {"helpdesk.ticket", "mrp.production"}
+    assert all(call[1] != "check_access_rights" for call in client.calls)

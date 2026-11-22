@@ -246,43 +246,63 @@ the review off entirely, for trusted deployments only.
 
 ## Seeing the effective rights
 
-Set `ODOO_MCP_LOG_RIGHTS=1` to log two separate reports, once per
-instance:
+Set `ODOO_MCP_LOG_RIGHTS=1` to log two separate reports per instance:
 
-1. **Odoo rights**: what the connected Odoo user may do on each model, as
-   Odoo grants it through `ir.model.access` rows for the user's groups
-   (read, write, create, unlink). This part ignores `model_acl` entirely.
+1. **Odoo rights**: what the connected Odoo user may do on each model
+   (read, write, create, unlink), as Odoo itself grants it. This part
+   ignores `model_acl` entirely.
 2. **model_acl impact**: for the models the user has Odoo rights on, which
    of those operations `model_acl` blocks, plus the methods named in rules
    for that model and whether other methods are allowed.
 
-When it runs:
+It runs once at startup, in the background, for every configured instance,
+with its own Odoo connection. The server doesn't wait for it, whatever the
+transport. If an instance can't be reached or the report fails, a warning
+is logged and the server carries on.
 
-- **HTTP transports** (`streamable-http`, `sse`): right at startup, in the
-  background, for every configured instance. The server doesn't wait for
-  it. If an instance can't be reached, a warning is logged and it is retried
-  on the first tool call that reaches Odoo.
-- **stdio**: on the first tool call that reaches Odoo, so a desktop client
-  never waits for Odoo while starting the server. A startup line says so.
-  `health_check` and `list_instances` don't reach Odoo.
+### How the Odoo rights are found
+
+- **Administrators** (users who may read `ir.model` and `ir.model.access`):
+  every model and access rule is read in one go and combined for the user's
+  groups. This covers every installed model.
+- **Everyone else**: normal users may not read those tables. The server
+  then asks Odoo model by model whether this user may read, write, create
+  and delete (`has_access` on Odoo 18+, `check_access_rights` on older
+  versions), which any user is allowed to do. The answers are the same as
+  in the administrator case. Because the full model list can't be read, a
+  **candidate list** is checked:
+  - about 40 common business models (contacts, sales, invoices, projects,
+    tasks, employees, …),
+  - every model named exactly in this instance's `model_acl` rules,
+  - any models you list in `ODOO_MCP_LOG_RIGHTS_MODELS`
+    (comma-separated, e.g. `x_custom.model,quality.check`).
+
+  Models that aren't installed are skipped. A wildcard rule like
+  `website.*` can't be expanded without the model list. If no candidate
+  matches it, the log says so; list the models you care about in
+  `ODOO_MCP_LOG_RIGHTS_MODELS`.
+
+### Output
 
 The summary is logged at INFO. Set `ODOO_MCP_LOG_LEVEL=DEBUG` to also get
-one line per model:
+one line per model. For a normal user:
 
 ```text
-INFO  Odoo rights [default] for user agent@example.com (uid 7): 212 of 640 models accessible (212 read, 140 write, 131 create, 96 unlink).
-DEBUG Odoo rights [default] project.project: read write unlink
-DEBUG Odoo rights [default] project.task: read write create
-INFO  model_acl impact [default]: of 212 models with Odoo rights, 209 fully blocked; CRUD left on 3 models (3 read, 1 write, 1 create, 0 unlink).
-DEBUG model_acl impact [default] project.project: read | blocked: write unlink | methods: message_subscribe allowed | other methods blocked
+INFO  Odoo rights [default]: this user may not read the full model list (You are not allowed to access 'Models' (ir.model) records.); checking 42 candidate models one by one instead. Add models with ODOO_MCP_LOG_RIGHTS_MODELS.
+INFO  Odoo rights [default] for user agent@example.com (uid 6): 12 of 13 installed candidate models accessible (12 read, 6 write, 6 create, 6 unlink).
+DEBUG Odoo rights [default] project.project: read
+DEBUG Odoo rights [default] project.task: read write create unlink
+DEBUG Odoo rights [default] not installed (skipped): account.move crm.lead hr.employee ...
+INFO  model_acl impact [default]: of 12 models with Odoo rights, 9 fully blocked; CRUD left on 3 models (3 read, 1 write, 1 create, 1 unlink).
+DEBUG model_acl impact [default] project.project: read | methods: message_subscribe allowed | other methods blocked
 DEBUG model_acl impact [default] res.partner: all blocked
 ```
 
 Notes:
 
-- The report costs a few extra Odoo queries per instance, which is why it
-  is opt-in. If it can't be built (for example because the user may not
-  read `ir.model.access`), a warning is logged and the server carries on.
+- The report costs extra Odoo calls at startup: a few for administrators,
+  and up to four per candidate model for normal users. That's why it is
+  opt-in.
 - Record rules (which rows of a model the user sees) are not included. Use
   the `diagnose_access` tool for a specific model.
 - A method allowed by `model_acl` still needs the matching Odoo right;

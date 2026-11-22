@@ -958,7 +958,7 @@ def build_odoo_client(entry: dict[str, Any], *, name: str = "default") -> OdooCl
     if lang:
         print(f"  Default locale: {lang}", file=sys.stderr)
 
-    client = OdooClient(
+    return OdooClient(
         url=entry["url"],
         db=entry["db"],
         username=str(entry.get("username", "")),
@@ -971,13 +971,6 @@ def build_odoo_client(entry: dict[str, Any], *, name: str = "default") -> OdooCl
         lang=lang,
         instance=name,
     )
-    # Opt-in (ODOO_MCP_LOG_RIGHTS=1): log the user's Odoo rights and the
-    # model_acl impact once per instance. Lazy import: it imports helpers
-    # that depend on this module.
-    from .rights_report import maybe_log_rights
-
-    maybe_log_rights(client, name)
-    return client
 
 
 def get_odoo_client() -> OdooClient:

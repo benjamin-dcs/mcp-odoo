@@ -19,10 +19,13 @@ All notable changes to this project will be documented in this file.
   methods, so no second entry in `allowed_side_effect_methods` is needed.
   Wildcard rules and an `allow` default do not count, so those methods stay
   blocked until named. The existing allowlist keeps working.
-- `ODOO_MCP_LOG_RIGHTS=1` logs, once per instance, which models the
+- `ODOO_MCP_LOG_RIGHTS=1` logs at startup, per instance, which models the
   connected Odoo user may read, write, create and delete. It also logs,
-  separately, what `model_acl` blocks of those. Summary at INFO, one line
-  per model at DEBUG.
+  separately, what `model_acl` blocks of those. This works for normal users
+  too: since they can't read the model list, a list of common and
+  configured models is checked one by one (`ODOO_MCP_LOG_RIGHTS_MODELS`
+  adds more). Summary at INFO, one line per model at DEBUG. Tested on Odoo
+  17, 18 and 19, over XML-RPC and JSON-2.
 
 ### Fixed
 
