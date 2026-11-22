@@ -19,6 +19,15 @@ All notable changes to this project will be documented in this file.
   methods, so no second entry in `allowed_side_effect_methods` is needed.
   Wildcard rules and an `allow` default do not count, so those methods stay
   blocked until named. The existing allowlist keeps working.
+- `ODOO_MCP_LOG_RIGHTS=1` logs, once per instance, which models the
+  connected Odoo user may read, write, create and delete. It also logs,
+  separately, what `model_acl` blocks of those. Summary at INFO, one line
+  per model at DEBUG.
+
+### Fixed
+
+- `diagnose_access` treated access rules that apply to every user (no group)
+  as not applying, so it could wrongly report "no ACL row grants access".
 
 ## [1.3.2] - 2026-08-19
 

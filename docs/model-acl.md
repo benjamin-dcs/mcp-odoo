@@ -244,6 +244,40 @@ the review off entirely, for trusted deployments only.
   unaffected.
 - The policy is loaded once per process. Restart the server after changing it.
 
+## Seeing the effective rights
+
+Set `ODOO_MCP_LOG_RIGHTS=1` to log, once per instance when the server first
+connects, two separate reports:
+
+1. **Odoo rights**: what the connected Odoo user may do on each model, as
+   Odoo grants it through `ir.model.access` rows for the user's groups
+   (read, write, create, unlink). This part ignores `model_acl` entirely.
+2. **model_acl impact**: for the models the user has Odoo rights on, which
+   of those operations `model_acl` blocks, plus the methods named in rules
+   for that model and whether other methods are allowed.
+
+The summary is logged at INFO. Set `ODOO_MCP_LOG_LEVEL=DEBUG` to also get
+one line per model:
+
+```text
+INFO  Odoo rights [default] for user agent@example.com (uid 7): 212 of 640 models accessible (212 read, 140 write, 131 create, 96 unlink).
+DEBUG Odoo rights [default] project.project: read write unlink
+DEBUG Odoo rights [default] project.task: read write create
+INFO  model_acl impact [default]: of 212 models with Odoo rights, 209 fully blocked; CRUD left on 3 models (3 read, 1 write, 1 create, 0 unlink).
+DEBUG model_acl impact [default] project.project: read | blocked: write unlink | methods: message_subscribe allowed | other methods blocked
+DEBUG model_acl impact [default] res.partner: all blocked
+```
+
+Notes:
+
+- The report costs a few extra Odoo queries per instance, which is why it
+  is opt-in. If it can't be built (for example because the user may not
+  read `ir.model.access`), a warning is logged and the server carries on.
+- Record rules (which rows of a model the user sees) are not included. Use
+  the `diagnose_access` tool for a specific model.
+- A method allowed by `model_acl` still needs the matching Odoo right;
+  Odoo checks most methods against write access.
+
 ## Verifying
 
 ```bash

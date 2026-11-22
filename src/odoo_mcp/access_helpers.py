@@ -51,6 +51,10 @@ def _safe_metadata_read(
 
 
 def _m2o_id(value: Any) -> int | None:
+    # Odoo sends False for an empty many2one; bool is an int subclass, so it
+    # must be rejected before the int checks below.
+    if isinstance(value, bool):
+        return None
     if isinstance(value, list) and value and isinstance(value[0], int):
         return int(value[0])
     if isinstance(value, tuple) and value and isinstance(value[0], int):
