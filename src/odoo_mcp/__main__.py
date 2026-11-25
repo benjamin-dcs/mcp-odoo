@@ -182,10 +182,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Streamable HTTP path. Defaults to MCP_HTTP_PATH or /mcp.",
     )
     parser.add_argument(
+        "--http-log-level",
+        choices=LOG_LEVELS,
+        type=str.upper,
+        default=None,
+        help=(
+            "Log level of the HTTP server (uvicorn) for streamable-http and sse. "
+            "Defaults to MCP_HTTP_LOG_LEVEL or INFO. odoo-mcp's own log level "
+            "is ODOO_MCP_LOG_LEVEL."
+        ),
+    )
+    # Deprecated alias of --http-log-level, kept so existing configs still work.
+    parser.add_argument(
         "--log-level",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        default=os.environ.get("MCP_LOG_LEVEL", "INFO").upper(),
-        help="MCP HTTP server log level.",
+        dest="legacy_log_level",
+        choices=LOG_LEVELS,
+        type=str.upper,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--allow-remote-http",
@@ -219,7 +233,51 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "write a config file, and print client snippets."
         ),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.http_log_level = resolve_http_log_level(
+        args.http_log_level, args.legacy_log_level, parser
+    )
+    del args.legacy_log_level
+    return args
+
+
+def resolve_http_log_level(
+    flag: str | None, legacy_flag: str | None, parser: argparse.ArgumentParser
+) -> str:
+    """Pick the uvicorn log level, honouring the deprecated names with a warning.
+
+    Order: --http-log-level, --log-level, MCP_HTTP_LOG_LEVEL, MCP_LOG_LEVEL, INFO.
+    """
+    if flag:
+        return flag
+    if legacy_flag:
+        print(
+            "Warning: --log-level is deprecated; use --http-log-level. "
+            "It sets the HTTP server (uvicorn) log level only; "
+            "odoo-mcp's own log level is ODOO_MCP_LOG_LEVEL.",
+            file=sys.stderr,
+        )
+        return legacy_flag
+    env_name = "MCP_HTTP_LOG_LEVEL"
+    value = os.environ.get(env_name)
+    if not value and os.environ.get("MCP_LOG_LEVEL"):
+        env_name = "MCP_LOG_LEVEL"
+        value = os.environ["MCP_LOG_LEVEL"]
+        print(
+            "Warning: MCP_LOG_LEVEL is deprecated; use MCP_HTTP_LOG_LEVEL. "
+            "It sets the HTTP server (uvicorn) log level only; "
+            "odoo-mcp's own log level is ODOO_MCP_LOG_LEVEL.",
+            file=sys.stderr,
+        )
+    if not value:
+        return "INFO"
+    level = value.strip().upper()
+    if level not in LOG_LEVELS:
+        parser.error(
+            f"{env_name}={value!r} is not a log level; "
+            f"use one of {', '.join(LOG_LEVELS)}."
+        )
+    return level
 
 
 def configure_mcp_runtime(args: argparse.Namespace) -> dict[str, object]:
@@ -240,7 +298,7 @@ def configure_mcp_runtime(args: argparse.Namespace) -> dict[str, object]:
             "prefer streamable-http (or stdio for local clients).",
             file=sys.stderr,
         )
-    mcp.settings.log_level = args.log_level
+    mcp.settings.log_level = args.http_log_level
     configure_oauth(args)
     if args.transport == "stdio":
         setattr(mcp, "_odoo_runtime", {"transport": "stdio"})
@@ -311,7 +369,7 @@ def health_payload(args: argparse.Namespace) -> dict[str, object]:
         "host": args.host,
         "port": args.port,
         "path": args.path,
-        "log_level": args.log_level,
+        "http_log_level": args.http_log_level,
         "allow_remote_http": args.allow_remote_http,
         "transport_security": transport_security,
     }

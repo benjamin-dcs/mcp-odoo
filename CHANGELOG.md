@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The HTTP server's log level is now set with `--http-log-level` or
+  `MCP_HTTP_LOG_LEVEL`. The old names, `--log-level` and `MCP_LOG_LEVEL`,
+  only ever set uvicorn's level, not odoo-mcp's own logs
+  (`ODOO_MCP_LOG_LEVEL`). They still work but print a deprecation warning.
+  An invalid `MCP_HTTP_LOG_LEVEL` value now stops startup with an error.
+  `--health` output reports the level as `http_log_level` instead of
+  `log_level`.
+
 ### Added
 
 - **Model/method ACL (`model_acl`).** An optional policy that decides which

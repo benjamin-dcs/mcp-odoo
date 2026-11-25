@@ -2,6 +2,8 @@ import importlib
 import json
 import logging
 
+import pytest
+
 
 def test_parse_args_defaults_to_stdio(monkeypatch):
     cli = importlib.import_module("odoo_mcp.__main__")
@@ -10,6 +12,8 @@ def test_parse_args_defaults_to_stdio(monkeypatch):
     monkeypatch.delenv("MCP_HTTP_PORT", raising=False)
     monkeypatch.delenv("MCP_HTTP_PATH", raising=False)
     monkeypatch.delenv("MCP_ALLOW_REMOTE_HTTP", raising=False)
+    monkeypatch.delenv("MCP_HTTP_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("MCP_LOG_LEVEL", raising=False)
 
     args = cli.parse_args([])
 
@@ -18,6 +22,7 @@ def test_parse_args_defaults_to_stdio(monkeypatch):
     assert args.port == 8000
     assert args.path == "/mcp"
     assert args.allow_remote_http is False
+    assert args.http_log_level == "INFO"
 
 
 def test_cli_applies_streamable_http_runtime_settings(monkeypatch):
@@ -41,7 +46,7 @@ def test_cli_applies_streamable_http_runtime_settings(monkeypatch):
             "9999",
             "--path",
             "/mcp-test",
-            "--log-level",
+            "--http-log-level",
             "WARNING",
             "--allow-remote-http",
             "--allowed-hosts",
@@ -374,3 +379,50 @@ def test_main_entrypoint_invokes_sys_exit_with_main_return_value(monkeypatch, ca
     # restore the real main for any later tests
     monkeypatch.setattr(cli, "main", real_main)
     monkeypatch.setattr(_sys, "exit", real_exit)
+
+
+def _clear_http_log_level_env(monkeypatch):
+    monkeypatch.delenv("MCP_HTTP_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("MCP_LOG_LEVEL", raising=False)
+
+
+def test_http_log_level_flag_and_env(monkeypatch, capsys):
+    cli = importlib.import_module("odoo_mcp.__main__")
+    _clear_http_log_level_env(monkeypatch)
+
+    assert cli.parse_args(["--http-log-level", "debug"]).http_log_level == "DEBUG"
+
+    monkeypatch.setenv("MCP_HTTP_LOG_LEVEL", "warning")
+    assert cli.parse_args([]).http_log_level == "WARNING"
+    # The flag beats the env var.
+    assert cli.parse_args(["--http-log-level", "ERROR"]).http_log_level == "ERROR"
+    assert "deprecated" not in capsys.readouterr().err
+
+
+def test_http_log_level_deprecated_names_still_work(monkeypatch, capsys):
+    cli = importlib.import_module("odoo_mcp.__main__")
+    _clear_http_log_level_env(monkeypatch)
+
+    args = cli.parse_args(["--log-level", "WARNING"])
+    assert args.http_log_level == "WARNING"
+    assert not hasattr(args, "legacy_log_level")
+    assert "--log-level is deprecated" in capsys.readouterr().err
+
+    monkeypatch.setenv("MCP_LOG_LEVEL", "error")
+    assert cli.parse_args([]).http_log_level == "ERROR"
+    assert "MCP_LOG_LEVEL is deprecated" in capsys.readouterr().err
+
+    # The new env var wins over the old one, without a warning.
+    monkeypatch.setenv("MCP_HTTP_LOG_LEVEL", "DEBUG")
+    assert cli.parse_args([]).http_log_level == "DEBUG"
+    assert "deprecated" not in capsys.readouterr().err
+
+
+def test_http_log_level_invalid_env_is_rejected(monkeypatch, capsys):
+    cli = importlib.import_module("odoo_mcp.__main__")
+    _clear_http_log_level_env(monkeypatch)
+    monkeypatch.setenv("MCP_HTTP_LOG_LEVEL", "NOPE")
+
+    with pytest.raises(SystemExit):
+        cli.parse_args([])
+    assert "MCP_HTTP_LOG_LEVEL='NOPE'" in capsys.readouterr().err
