@@ -25,7 +25,9 @@ All notable changes to this project will be documented in this file.
   too: since they can't read the model list, a list of common and
   configured models is checked one by one (`ODOO_MCP_LOG_RIGHTS_MODELS`
   adds more). Summary at INFO, one line per model at DEBUG. Tested on Odoo
-  17, 18 and 19, over XML-RPC and JSON-2.
+  17, 18 and 19, over XML-RPC and JSON-2, and with a Dutch-language user.
+  The report's own expected Odoo refusals are not printed as errors, and a
+  model that can't be checked is listed rather than stopping the report.
 
 ### Fixed
 

@@ -45,6 +45,7 @@ from .access_helpers import (
     _m2o_id,
 )
 from .model_policy import METHOD_GROUPS, ModelPolicy, get_model_policy, metadata_scope
+from .odoo_client import quiet_requests
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,7 @@ class RightsResult:
     source: str  # "ir.model.access" or "per-model check"
     models_checked: int
     not_installed: List[str] = field(default_factory=list)
+    unchecked: Dict[str, str] = field(default_factory=dict)  # model -> reason
     fallback_reason: Optional[str] = None
     unmatched_globs: List[str] = field(default_factory=list)
 
@@ -224,6 +226,10 @@ def candidate_models(policy: ModelPolicy, instance: str) -> Tuple[List[str], Lis
 def _first_line(exc: Exception) -> str:
     text = str(getattr(exc, "faultString", None) or exc).strip()
     return text.splitlines()[0] if text else type(exc).__name__
+
+
+class ProbeUnavailable(RuntimeError):
+    """Odoo offers no access-check method this probe can use."""
 
 
 class AccessProbe:
@@ -268,7 +274,7 @@ class AccessProbe:
                 raise
             self.method = method
             return bool(result)
-        raise RuntimeError(
+        raise ProbeUnavailable(
             "Odoo accepted neither has_access nor check_access_rights: "
             f"{_first_line(last_error) if last_error else 'no answer'}"
         )
@@ -283,12 +289,15 @@ def _odoo_message(exc: Exception) -> str:
 
 
 def classify_probe_error(exc: Exception, model: str, method: str) -> str:
-    """'model_missing', 'method_unavailable' or 'other', from Odoo's error text.
+    """'model_missing', 'method_unavailable' or 'other', from Odoo's error.
 
-    Texts (Odoo 17-19): XML-RPC "Object <model> doesn't exist"; JSON-2 "the
-    model '<model>' does not exist"; a missing method "The method
-    '<model>.<method>' does not exist" (in an XML-RPC traceback, on its last
-    line); a private one "Private methods (such as '<model>.<method>') ...".
+    Odoo translates "model not installed" into the user's language ("Object
+    hr.attendance bestaat niet"), so the English texts are only a first try.
+    The language-independent signal is XML-RPC fault code 2 (Odoo's
+    user-facing error) or JSON-2 HTTP 404, with the model named in the
+    message. A missing method is an untranslated "The method
+    '<model>.<method>' does not exist" (in an XML-RPC traceback); a private
+    one "Private methods (such as '<model>.<method>') ...".
     """
     text = _odoo_message(exc)
     lowered = text.lower()
@@ -296,6 +305,10 @@ def classify_probe_error(exc: Exception, model: str, method: str) -> str:
         return "model_missing"
     if f"'{model}.{method}'" in text:
         return "method_unavailable"
+    code = getattr(exc, "faultCode", None)
+    status = getattr(exc, "status_code", None)
+    if (code == 2 or status == 404) and model in text:
+        return "model_missing"
     return "other"
 
 
@@ -341,28 +354,44 @@ def _collect_bulk(client: Any) -> Tuple[Dict[str, Any], Dict[str, List[str]], in
 
 def _collect_by_probe(
     client: Any, models: List[str]
-) -> Tuple[Dict[str, List[str]], List[str]]:
-    """Any-user path: ask Odoo per model and operation."""
+) -> Tuple[Dict[str, List[str]], List[str], Dict[str, str]]:
+    """Any-user path: ask Odoo per model and operation.
+
+    Returns (rights, not installed, could-not-check model -> reason). One
+    model failing never stops the others; only a server that offers no
+    usable access-check method does.
+    """
     probe = AccessProbe(client)
     rights: Dict[str, List[str]] = {}
     not_installed: List[str] = []
+    unchecked: Dict[str, str] = {}
     for model in models:
         granted: List[str] = []
-        for op, _ in OPERATIONS:
-            answer = probe.check(model, op)
-            if answer is None:
-                not_installed.append(model)
-                break
-            if answer:
-                granted.append(op)
+        try:
+            for op, _ in OPERATIONS:
+                answer = probe.check(model, op)
+                if answer is None:
+                    not_installed.append(model)
+                    break
+                if answer:
+                    granted.append(op)
+        except ProbeUnavailable:
+            raise
+        except Exception as exc:
+            unchecked[model] = _odoo_message(exc).strip().splitlines()[-1][:200]
+            continue
         if granted:
             rights[model] = granted
-    return rights, not_installed
+    if unchecked and len(unchecked) + len(not_installed) == len(models):
+        # Not a single model answered: report the failure, not "0 of 0".
+        first_model, first_reason = next(iter(unchecked.items()))
+        raise RuntimeError(f"no model could be checked ({first_model}: {first_reason})")
+    return rights, not_installed, unchecked
 
 
 def collect_odoo_rights(client: Any, instance: str = "default") -> RightsResult:
     """Bulk read when allowed (admins), otherwise check candidate models one by one."""
-    with metadata_scope():
+    with metadata_scope(), quiet_requests():
         try:
             user, rights, model_count = _collect_bulk(client)
             return RightsResult(user, rights, "ir.model.access", model_count)
@@ -374,13 +403,14 @@ def collect_odoo_rights(client: Any, instance: str = "default") -> RightsResult:
             uid = context.get("uid") if isinstance(context, dict) else None
         user = {"uid": uid, "login": getattr(client, "username", None)}
         models, unmatched = candidate_models(get_model_policy(), instance)
-        rights, not_installed = _collect_by_probe(client, models)
+        rights, not_installed, unchecked = _collect_by_probe(client, models)
     return RightsResult(
         user,
         rights,
         "per-model check",
-        len(models) - len(not_installed),
+        len(models) - len(not_installed) - len(unchecked),
         not_installed,
+        unchecked,
         reason,
         unmatched,
     )
@@ -404,7 +434,7 @@ def log_rights_report(client: Any, instance: str) -> None:
             "checking %d candidate models one by one instead. Add models with %s.",
             instance,
             result.fallback_reason,
-            result.models_checked + len(result.not_installed),
+            result.models_checked + len(result.not_installed) + len(result.unchecked),
             RIGHTS_MODELS_ENV,
         )
         scope = (
@@ -414,6 +444,16 @@ def log_rights_report(client: Any, instance: str) -> None:
     logger.info(
         "Odoo rights [%s] for %s: %s (%s).", instance, who, scope, _counts(rights)
     )
+    if result.unchecked:
+        first_model, first_reason = next(iter(result.unchecked.items()))
+        logger.warning(
+            "Odoo rights [%s]: %d model(s) could not be checked (e.g. %s: %s); "
+            "they are left out of the report.",
+            instance,
+            len(result.unchecked),
+            first_model,
+            first_reason,
+        )
     if result.unmatched_globs:
         logger.info(
             "Odoo rights [%s]: no candidate model matches model_acl pattern(s) %s; "
@@ -425,6 +465,8 @@ def log_rights_report(client: Any, instance: str) -> None:
     if logger.isEnabledFor(logging.DEBUG):
         for line in format_odoo_rights(rights):
             logger.debug("Odoo rights [%s] %s", instance, line)
+        for model, reason in result.unchecked.items():
+            logger.debug("Odoo rights [%s] could not check %s: %s", instance, model, reason)
         if result.not_installed:
             logger.debug(
                 "Odoo rights [%s] not installed (skipped): %s",
@@ -481,7 +523,6 @@ def start_rights_report(transport: str) -> Optional[threading.Thread]:
 
 
 def _report_all_instances() -> None:
-    # Lazy: keeps this core module from importing odoo_client at import time.
     from . import odoo_client
 
     try:

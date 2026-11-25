@@ -17,7 +17,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xmlrpc.client
-from typing import Any, cast
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterator, cast
 
 from .diagnostics import (
     JSON2_POSITIONAL_ARG_MAP,
@@ -27,6 +29,21 @@ from .diagnostics import (
 from .model_policy import enforce_model_acl, metadata_scope
 
 SUPPORTED_TRANSPORTS = {"xmlrpc", "json2"}
+
+# Set while the server makes calls whose failures are expected and handled
+# (e.g. the rights report probing models): suppresses the per-request stderr
+# chatter and "Error during request" lines. Errors are still raised.
+_quiet_requests: ContextVar[bool] = ContextVar("odoo_mcp_quiet_requests", default=False)
+
+
+@contextmanager
+def quiet_requests() -> Iterator[None]:
+    """Suppress per-request stderr output for calls made inside this block."""
+    token = _quiet_requests.set(True)
+    try:
+        yield
+    finally:
+        _quiet_requests.reset(token)
 
 
 def _retry_attempts() -> int:
@@ -332,10 +349,11 @@ class OdooClient:
         )
 
         try:
-            print(
-                f"Making JSON-2 request to {self.hostname}/json/2/{model}/{method}",
-                file=sys.stderr,
-            )
+            if not _quiet_requests.get():
+                print(
+                    f"Making JSON-2 request to {self.hostname}/json/2/{model}/{method}",
+                    file=sys.stderr,
+                )
             with urllib.request.urlopen(
                 request,
                 timeout=self.timeout,
@@ -718,7 +736,8 @@ class RedirectTransport(xmlrpc.client.Transport):
         redirects = 0
         while redirects < self.max_redirects:
             try:
-                print(f"Making request to {host}{handler}", file=sys.stderr)
+                if not _quiet_requests.get():
+                    print(f"Making request to {host}{handler}", file=sys.stderr)
                 return super().request(host, handler, request_body, verbose)
             except xmlrpc.client.ProtocolError as err:
                 if err.errcode in (301, 302, 303, 307, 308) and err.headers.get(
@@ -739,7 +758,8 @@ class RedirectTransport(xmlrpc.client.Transport):
                 else:
                     raise
             except Exception as e:
-                print(f"Error during request: {str(e)}", file=sys.stderr)
+                if not _quiet_requests.get():
+                    print(f"Error during request: {str(e)}", file=sys.stderr)
                 raise
 
         host_label = host[0] if isinstance(host, tuple) else str(host)

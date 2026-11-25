@@ -145,8 +145,8 @@ def test_candidate_models_include_rules_env_and_report_unmatched_globs(monkeypat
 # --------------------------------------------------------------------------
 
 
-def fault(message):
-    return xmlrpc.client.Fault(4, message)
+def fault(message, code=4):
+    return xmlrpc.client.Fault(code, message)
 
 
 class AdminClient:
@@ -208,7 +208,7 @@ class UserClient:
                     f"AttributeError: The method '{model}.{method}' does not exist"
                 )
             if model not in INSTALLED:
-                raise fault(f"Object {model} doesn't exist")
+                raise fault(f"Object {model} doesn't exist", code=2)
             operation = kwargs.get("operation") or (args[1] if method == "has_access" else args[0])
             return operation in PROBE_RIGHTS.get(model, set())
         raise AssertionError((model, method))
@@ -348,7 +348,8 @@ def test_start_reports_every_instance_in_background(monkeypatch, caplog, transpo
     assert "Odoo rights [main] for user admin@example.com" in text
     assert "Odoo rights [user] for user user@example.com" in text
     assert "Rights report [broken]: could not connect to Odoo: unreachable" in text
-    assert "Could not build the rights report for [failing]: boom" in text
+    assert "Could not build the rights report for [failing]: no model could be checked" in text
+    assert "boom" in text
 
 
 class _Json2Error(Exception):
@@ -382,6 +383,10 @@ class _Json2Error(Exception):
             "method_unavailable",
         ),
         (fault("Access Denied"), "other"),
+        # Dutch user on Odoo 17 (captured): translated text, fault code 2
+        (fault("Object account.account bestaat niet", code=2), "model_missing"),
+        # same code but about something else: not a missing model
+        (fault("Ongeldige waarde", code=2), "other"),
     ],
 )
 def test_classify_probe_error_real_texts(exc, verdict):
@@ -401,3 +406,51 @@ def test_json2_missing_model_is_skipped_not_method_error():
     result = collect_odoo_rights(client)
     assert set(result.not_installed) == {"helpdesk.ticket", "mrp.production"}
     assert all(call[1] != "check_access_rights" for call in client.calls)
+
+
+def test_dutch_user_missing_models_are_skipped():
+    """Reproduces a colleague's log: Odoo 17, Dutch user, no has_access."""
+
+    class DutchUser(UserClient):
+        def execute_method(self, model, method, *args, **kwargs):
+            if method == "check_access_rights" and model not in INSTALLED:
+                raise fault(f"Object {model} bestaat niet", code=2)
+            return super().execute_method(model, method, *args, **kwargs)
+
+    result = collect_odoo_rights(DutchUser(methods=("check_access_rights",)))
+    assert set(result.not_installed) == {"helpdesk.ticket", "mrp.production"}
+    assert result.unchecked == {}
+    assert result.rights["project.task"] == ["read", "write", "create"]
+
+
+def test_one_failing_model_does_not_stop_the_report(caplog):
+    class Flaky(UserClient):
+        def execute_method(self, model, method, *args, **kwargs):
+            if model == "sale.order" and method == "has_access":
+                raise fault("Unexpected server error", code=1)
+            return super().execute_method(model, method, *args, **kwargs)
+
+    with caplog.at_level(logging.DEBUG, logger="odoo_mcp.rights_report"):
+        log_rights_report(Flaky(), "default")
+    text = caplog.text
+    assert "1 model(s) could not be checked (e.g. sale.order: Unexpected server error)" in text
+    assert "could not check sale.order: Unexpected server error" in text
+    assert "Odoo rights [default] project.task: read write create" in text
+
+
+def test_report_requests_are_quiet(capsys, monkeypatch):
+    import odoo_mcp.odoo_client as oc
+
+    def refuse(self, host, handler, request_body, verbose=False):
+        raise fault("You are not allowed to access 'Models' (ir.model) records.")
+
+    monkeypatch.setattr(xmlrpc.client.Transport, "request", refuse)
+    transport = oc.RedirectTransport(timeout=1, use_https=False, verify_ssl=True)
+    with oc.quiet_requests(), pytest.raises(xmlrpc.client.Fault):
+        transport.request("odoo.example", "/xmlrpc/2/object", b"")
+    assert capsys.readouterr().err == ""
+    with pytest.raises(xmlrpc.client.Fault):
+        transport.request("odoo.example", "/xmlrpc/2/object", b"")
+    err = capsys.readouterr().err
+    assert "Making request to odoo.example/xmlrpc/2/object" in err
+    assert "Error during request" in err
