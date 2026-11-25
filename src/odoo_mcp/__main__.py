@@ -14,6 +14,7 @@ import traceback
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .auth import build_auth
+from .rights_report import start_rights_report
 from .server import mcp
 
 SUPPORTED_MCP_TRANSPORTS = {"stdio", "streamable-http", "sse"}
@@ -79,12 +80,19 @@ def setup_logging(
     level: str | None = None,
     use_json: bool | None = None,
     log_file: str | None = None,
+    library_level: str | None = None,
 ) -> logging.Logger:
-    """Configure the root logger from CLI args or env vars.
+    """Configure logging from CLI args or env vars.
 
     Reads ``ODOO_MCP_LOG_LEVEL``, ``ODOO_MCP_LOG_JSON`` (truthy), and
     ``ODOO_MCP_LOG_FILE`` when explicit kwargs are not supplied. Adds a
     rotating file handler when a log file path is configured.
+
+    ``ODOO_MCP_LOG_LEVEL`` applies to the ``odoo_mcp`` logger only. The root
+    logger, which third-party libraries (mcp, sse-starlette, httpx, ...)
+    propagate to, uses ``library_level`` (the HTTP log level; INFO by
+    default), so ``ODOO_MCP_LOG_LEVEL=DEBUG`` does not turn on library
+    debug noise such as SSE keep-alive pings. Returns the ``odoo_mcp`` logger.
     """
     resolved_level = (level or os.environ.get("ODOO_MCP_LOG_LEVEL", "INFO")).upper()
     if resolved_level not in LOG_LEVELS:
@@ -107,14 +115,21 @@ def setup_logging(
             datefmt="%Y-%m-%dT%H:%M:%S",
         )
 
+    resolved_library_level = (library_level or "INFO").upper()
+    if resolved_library_level not in LOG_LEVELS:
+        resolved_library_level = "INFO"
+
     root = logging.getLogger()
-    root.setLevel(resolved_level)
+    root.setLevel(resolved_library_level)
     # Replace existing handlers so repeated calls (tests) stay deterministic.
     root.handlers.clear()
+    # Handlers stay at NOTSET: filtering happens on the loggers, so the
+    # odoo_mcp level and the library level can differ in both directions.
+    package_logger = logging.getLogger("odoo_mcp")
+    package_logger.setLevel(resolved_level)
 
     stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
-    stream_handler.setLevel(resolved_level)
     root.addHandler(stream_handler)
 
     if resolved_file:
@@ -125,10 +140,9 @@ def setup_logging(
             encoding="utf-8",
         )
         file_handler.setFormatter(formatter)
-        file_handler.setLevel(resolved_level)
         root.addHandler(file_handler)
 
-    return root
+    return package_logger
 
 
 def parse_bool(value: str | None) -> bool:
@@ -181,10 +195,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Streamable HTTP path. Defaults to MCP_HTTP_PATH or /mcp.",
     )
     parser.add_argument(
+        "--http-log-level",
+        choices=LOG_LEVELS,
+        type=str.upper,
+        default=None,
+        help=(
+            "Log level of the HTTP server (uvicorn) for streamable-http and sse. "
+            "Defaults to MCP_HTTP_LOG_LEVEL or INFO. odoo-mcp's own log level "
+            "is ODOO_MCP_LOG_LEVEL."
+        ),
+    )
+    # Deprecated alias of --http-log-level, kept so existing configs still work.
+    parser.add_argument(
         "--log-level",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        default=os.environ.get("MCP_LOG_LEVEL", "INFO").upper(),
-        help="MCP HTTP server log level.",
+        dest="legacy_log_level",
+        choices=LOG_LEVELS,
+        type=str.upper,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--allow-remote-http",
@@ -218,7 +246,51 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "write a config file, and print client snippets."
         ),
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.http_log_level = resolve_http_log_level(
+        args.http_log_level, args.legacy_log_level, parser
+    )
+    del args.legacy_log_level
+    return args
+
+
+def resolve_http_log_level(
+    flag: str | None, legacy_flag: str | None, parser: argparse.ArgumentParser
+) -> str:
+    """Pick the uvicorn log level, honouring the deprecated names with a warning.
+
+    Order: --http-log-level, --log-level, MCP_HTTP_LOG_LEVEL, MCP_LOG_LEVEL, INFO.
+    """
+    if flag:
+        return flag
+    if legacy_flag:
+        print(
+            "Warning: --log-level is deprecated; use --http-log-level. "
+            "It sets the HTTP server (uvicorn) log level only; "
+            "odoo-mcp's own log level is ODOO_MCP_LOG_LEVEL.",
+            file=sys.stderr,
+        )
+        return legacy_flag
+    env_name = "MCP_HTTP_LOG_LEVEL"
+    value = os.environ.get(env_name)
+    if not value and os.environ.get("MCP_LOG_LEVEL"):
+        env_name = "MCP_LOG_LEVEL"
+        value = os.environ["MCP_LOG_LEVEL"]
+        print(
+            "Warning: MCP_LOG_LEVEL is deprecated; use MCP_HTTP_LOG_LEVEL. "
+            "It sets the HTTP server (uvicorn) log level only; "
+            "odoo-mcp's own log level is ODOO_MCP_LOG_LEVEL.",
+            file=sys.stderr,
+        )
+    if not value:
+        return "INFO"
+    level = value.strip().upper()
+    if level not in LOG_LEVELS:
+        parser.error(
+            f"{env_name}={value!r} is not a log level; "
+            f"use one of {', '.join(LOG_LEVELS)}."
+        )
+    return level
 
 
 def configure_mcp_runtime(args: argparse.Namespace) -> dict[str, object]:
@@ -239,7 +311,7 @@ def configure_mcp_runtime(args: argparse.Namespace) -> dict[str, object]:
             "prefer streamable-http (or stdio for local clients).",
             file=sys.stderr,
         )
-    mcp.settings.log_level = args.log_level
+    mcp.settings.log_level = args.http_log_level
     configure_oauth(args)
     if args.transport == "stdio":
         setattr(mcp, "_odoo_runtime", {"transport": "stdio"})
@@ -310,7 +382,7 @@ def health_payload(args: argparse.Namespace) -> dict[str, object]:
         "host": args.host,
         "port": args.port,
         "path": args.path,
-        "log_level": args.log_level,
+        "http_log_level": args.http_log_level,
         "allow_remote_http": args.allow_remote_http,
         "transport_security": transport_security,
     }
@@ -326,7 +398,7 @@ def main() -> int:
             from .setup_wizard import run_setup
 
             return run_setup()
-        setup_logging()
+        setup_logging(library_level=args.http_log_level)
         runtime_options = configure_mcp_runtime(args)
         if args.health:
             print(json.dumps(health_payload(args), sort_keys=True))
@@ -348,6 +420,7 @@ def main() -> int:
             if args.transport == "streamable-http":
                 print(f"  Path: {args.path}", file=sys.stderr)
         sys.stderr.flush()
+        start_rights_report(args.transport)
         mcp.run(transport=args.transport, **runtime_options)
 
         print("MCP server stopped normally", file=sys.stderr)

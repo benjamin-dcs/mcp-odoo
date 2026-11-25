@@ -75,6 +75,17 @@ class TestM2oId:
         assert access_helpers._m2o_id(["not_int", "name"]) is None
         assert access_helpers._m2o_id([1.5, "name"]) is None
 
+    def test_odoo_false_for_empty_many2one_returns_none(self):
+        """Odoo sends False for an empty many2one; bool must not pass as int."""
+        assert access_helpers._m2o_id(False) is None
+        assert access_helpers._m2o_id(True) is None
+
+    def test_global_acl_row_with_false_group_applies(self):
+        """A global ir.model.access row (group_id False) applies to every user."""
+        row = {"group_id": False, "perm_read": True}
+        assert access_helpers._acl_row_applies(row, None) is True
+        assert access_helpers._acl_row_applies(row, {10}) is True
+
     def test_non_list_non_tuple_non_int_returns_none(self):
         """Return None for other types."""
         assert access_helpers._m2o_id("string") is None

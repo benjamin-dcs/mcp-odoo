@@ -4,6 +4,50 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- The HTTP server's log level is now set with `--http-log-level` or
+  `MCP_HTTP_LOG_LEVEL`. The old names, `--log-level` and `MCP_LOG_LEVEL`,
+  only ever set uvicorn's level, not odoo-mcp's own logs
+  (`ODOO_MCP_LOG_LEVEL`). They still work but print a deprecation warning.
+  An invalid `MCP_HTTP_LOG_LEVEL` value now stops startup with an error.
+  `--health` output reports the level as `http_log_level` instead of
+  `log_level`.
+- `ODOO_MCP_LOG_LEVEL` now applies to odoo-mcp's own loggers only.
+  Setting it to `DEBUG` no longer turns on debug output from libraries,
+  such as the sse-starlette keep-alive `ping` lines every 15 seconds.
+  Library logs follow `MCP_HTTP_LOG_LEVEL` (default `INFO`) instead.
+
+### Added
+
+- **Model/method ACL (`model_acl`).** An optional policy that decides which
+  Odoo models and methods an agent may use through this server, per instance.
+  Write it as a default (`allow` or `deny`) plus rules such as
+  `project.*:@read`, `project.task:@write` or
+  `project.project:message_subscribe`. The most specific rule wins. Every
+  call to Odoo is checked, including plugins and approved writes. Models the
+  agent cannot use at all are hidden from model listings. Without a
+  `model_acl` key nothing changes. See `docs/model-acl.md`.
+- An exact `model_acl` allow rule such as `sale.order:action_confirm` now
+  counts as the review `execute_method` needs for action-like or unknown
+  methods, so no second entry in `allowed_side_effect_methods` is needed.
+  Wildcard rules and an `allow` default do not count, so those methods stay
+  blocked until named. The existing allowlist keeps working.
+- `ODOO_MCP_LOG_RIGHTS=1` logs at startup, per instance, which models the
+  connected Odoo user may read, write, create and delete. It also logs,
+  separately, what `model_acl` blocks of those. This works for normal users
+  too: since they can't read the model list, a list of common and
+  configured models is checked one by one (`ODOO_MCP_LOG_RIGHTS_MODELS`
+  adds more). Summary at INFO, one line per model at DEBUG. Tested on Odoo
+  17, 18 and 19, over XML-RPC and JSON-2, and with a Dutch-language user.
+  The report's own expected Odoo refusals are not printed as errors, and a
+  model that can't be checked is listed rather than stopping the report.
+
+### Fixed
+
+- `diagnose_access` treated access rules that apply to every user (no group)
+  as not applying, so it could wrongly report "no ACL row grants access".
+
 ## [1.3.2] - 2026-08-19
 
 ### Changed
