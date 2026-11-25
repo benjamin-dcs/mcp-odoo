@@ -113,6 +113,7 @@ def _restore_root_logger():
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(logging.WARNING)
+    logging.getLogger("odoo_mcp").setLevel(logging.NOTSET)
 
 
 def test_setup_logging_text_mode_uses_plain_formatter(monkeypatch, capsys):
@@ -213,6 +214,48 @@ def test_setup_logging_debug_level_actually_emits_debug(monkeypatch, capsys):
         assert "normal event" in out
     finally:
         _restore_root_logger()
+
+
+def test_setup_logging_debug_does_not_enable_library_debug(monkeypatch, capsys):
+    cli = importlib.import_module("odoo_mcp.__main__")
+
+    try:
+        cli.setup_logging(level="DEBUG")
+        logging.getLogger("odoo_mcp.rights_report").debug("own detail")
+        logging.getLogger("sse_starlette.sse").debug("ping")
+        logging.getLogger("sse_starlette.sse").info("library info")
+        out = capsys.readouterr().err
+        assert "own detail" in out
+        assert "ping" not in out
+        assert "library info" in out
+    finally:
+        _restore_root_logger()
+
+
+def test_setup_logging_library_level_applies_to_third_party(monkeypatch, capsys):
+    cli = importlib.import_module("odoo_mcp.__main__")
+
+    try:
+        cli.setup_logging(level="WARNING", library_level="DEBUG")
+        logging.getLogger("sse_starlette.sse").debug("ping")
+        logging.getLogger("odoo_mcp.test").info("own info")
+        out = capsys.readouterr().err
+        assert "ping" in out
+        assert "own info" not in out
+    finally:
+        _restore_root_logger()
+
+
+def test_main_passes_http_log_level_to_setup_logging(monkeypatch):
+    cli = importlib.import_module("odoo_mcp.__main__")
+    calls = {}
+    monkeypatch.setattr(cli, "setup_logging", lambda **kwargs: calls.update(kwargs))
+    monkeypatch.setattr(
+        cli.sys, "argv", ["odoo-mcp", "--http-log-level", "WARNING", "--health"]
+    )
+
+    assert cli.main() == 0
+    assert calls == {"library_level": "WARNING"}
 
 
 def test_setup_logging_json_includes_exception_traceback(monkeypatch, capsys):

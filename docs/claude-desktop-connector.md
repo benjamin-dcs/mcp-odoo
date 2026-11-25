@@ -79,7 +79,7 @@ Transport and network variables:
 | `MCP_HTTP_PORT` | `--port` | `8000` | Bind port |
 | `MCP_HTTP_PATH` | `--path` | `/mcp` | Endpoint path |
 | `MCP_ALLOW_REMOTE_HTTP` | `--allow-remote-http` | unset | Required when binding non-loopback |
-| `MCP_HTTP_LOG_LEVEL` | `--http-log-level` | `INFO` | uvicorn request/startup log level (odoo-mcp's own logs: `ODOO_MCP_LOG_LEVEL`) |
+| `MCP_HTTP_LOG_LEVEL` | `--http-log-level` | `INFO` | uvicorn request/startup and library (MCP SDK, sse-starlette) log level (odoo-mcp's own logs: `ODOO_MCP_LOG_LEVEL`) |
 | `MCP_ALLOWED_HOSTS` | `--allowed-hosts` | (any) | Comma-separated Host header allowlist |
 | `MCP_ALLOWED_ORIGINS` | `--allowed-origins` | (any) | Comma-separated Origin allowlist |
 

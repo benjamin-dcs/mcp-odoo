@@ -80,12 +80,19 @@ def setup_logging(
     level: str | None = None,
     use_json: bool | None = None,
     log_file: str | None = None,
+    library_level: str | None = None,
 ) -> logging.Logger:
-    """Configure the root logger from CLI args or env vars.
+    """Configure logging from CLI args or env vars.
 
     Reads ``ODOO_MCP_LOG_LEVEL``, ``ODOO_MCP_LOG_JSON`` (truthy), and
     ``ODOO_MCP_LOG_FILE`` when explicit kwargs are not supplied. Adds a
     rotating file handler when a log file path is configured.
+
+    ``ODOO_MCP_LOG_LEVEL`` applies to the ``odoo_mcp`` logger only. The root
+    logger, which third-party libraries (mcp, sse-starlette, httpx, ...)
+    propagate to, uses ``library_level`` (the HTTP log level; INFO by
+    default), so ``ODOO_MCP_LOG_LEVEL=DEBUG`` does not turn on library
+    debug noise such as SSE keep-alive pings. Returns the ``odoo_mcp`` logger.
     """
     resolved_level = (level or os.environ.get("ODOO_MCP_LOG_LEVEL", "INFO")).upper()
     if resolved_level not in LOG_LEVELS:
@@ -108,14 +115,21 @@ def setup_logging(
             datefmt="%Y-%m-%dT%H:%M:%S",
         )
 
+    resolved_library_level = (library_level or "INFO").upper()
+    if resolved_library_level not in LOG_LEVELS:
+        resolved_library_level = "INFO"
+
     root = logging.getLogger()
-    root.setLevel(resolved_level)
+    root.setLevel(resolved_library_level)
     # Replace existing handlers so repeated calls (tests) stay deterministic.
     root.handlers.clear()
+    # Handlers stay at NOTSET: filtering happens on the loggers, so the
+    # odoo_mcp level and the library level can differ in both directions.
+    package_logger = logging.getLogger("odoo_mcp")
+    package_logger.setLevel(resolved_level)
 
     stream_handler = logging.StreamHandler(sys.stderr)
     stream_handler.setFormatter(formatter)
-    stream_handler.setLevel(resolved_level)
     root.addHandler(stream_handler)
 
     if resolved_file:
@@ -126,10 +140,9 @@ def setup_logging(
             encoding="utf-8",
         )
         file_handler.setFormatter(formatter)
-        file_handler.setLevel(resolved_level)
         root.addHandler(file_handler)
 
-    return root
+    return package_logger
 
 
 def parse_bool(value: str | None) -> bool:
@@ -385,7 +398,7 @@ def main() -> int:
             from .setup_wizard import run_setup
 
             return run_setup()
-        setup_logging()
+        setup_logging(library_level=args.http_log_level)
         runtime_options = configure_mcp_runtime(args)
         if args.health:
             print(json.dumps(health_payload(args), sort_keys=True))

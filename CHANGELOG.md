@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
   An invalid `MCP_HTTP_LOG_LEVEL` value now stops startup with an error.
   `--health` output reports the level as `http_log_level` instead of
   `log_level`.
+- `ODOO_MCP_LOG_LEVEL` now applies to odoo-mcp's own loggers only.
+  Setting it to `DEBUG` no longer turns on debug output from libraries,
+  such as the sse-starlette keep-alive `ping` lines every 15 seconds.
+  Library logs follow `MCP_HTTP_LOG_LEVEL` (default `INFO`) instead.
 
 ### Added
 

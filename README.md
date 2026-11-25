@@ -242,8 +242,8 @@ Optional environment variables:
 | `ODOO_CONFIG_FILE` | unset | Explicit path to a config file, checked before the standard locations. |
 | `ODOO_LOCALE` | unset | Inject `context.lang` on every Odoo call. Caller-supplied `context.lang` always wins. |
 | `ODOO_MCP_MAX_SMART_FIELDS` | `15` | Cap for smart-field selection when caller omits `fields`. |
-| `ODOO_MCP_LOG_LEVEL` | `INFO` | Level of odoo-mcp's own logs (DEBUG/INFO/WARNING/ERROR/CRITICAL). Set `DEBUG` for per-model rights lines and other detail. |
-| `MCP_HTTP_LOG_LEVEL` | `INFO` | Level of the HTTP server's (uvicorn's) request and startup logs, for `streamable-http` and `sse`. Same as `--http-log-level`. Replaces `MCP_LOG_LEVEL` and `--log-level`, which still work but print a deprecation warning. |
+| `ODOO_MCP_LOG_LEVEL` | `INFO` | Level of odoo-mcp's own logs (DEBUG/INFO/WARNING/ERROR/CRITICAL). Set `DEBUG` for per-model rights lines and other detail. Applies to odoo-mcp's own loggers only, so it does not turn on debug output from libraries such as the MCP SDK or sse-starlette. |
+| `MCP_HTTP_LOG_LEVEL` | `INFO` | Level of the HTTP server's (uvicorn's) request and startup logs, for `streamable-http` and `sse`, and of the libraries odoo-mcp uses (MCP SDK, sse-starlette, httpx). Same as `--http-log-level`. Replaces `MCP_LOG_LEVEL` and `--log-level`, which still work but print a deprecation warning. |
 | `ODOO_MCP_LOG_JSON` | `0` | Truthy → emit JSON-formatted log lines. |
 | `ODOO_MCP_LOG_FILE` | unset | Path → enable rotating file handler (10MB × 3 backups). |
 | `ODOO_MCP_ENABLE_WRITES` | `0` | Required for `execute_approved_write`. |
